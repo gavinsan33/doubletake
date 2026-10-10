@@ -340,6 +340,22 @@ export ANDROID_HOME=... JAVA_HOME=...   # SDK with NDK, JDK 17+
 make android                             # android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+A signed, minified release APK (`android/app/build/outputs/apk/release/app-release.apk`)
+needs a keystore described by `android/keystore.properties`, which is git-ignored:
+
+```properties
+storeFile=/path/to/doubletake-release.jks
+storePassword=...
+keyAlias=doubletake
+keyPassword=...
+```
+
+```sh
+make android-release
+```
+
+Keep the keystore backed up: Android only accepts updates signed with the same key.
+
 ## Disclaimer
 
 The majority of code for this project was written by LLMs. I've read through the code to make sure there's nothing obviously stupid, but if you're in a production or security-sensitive environment and need to use AirPlay (for whatever reason), do not use this project.

@@ -1,4 +1,4 @@
-.PHONY: android android-aar all build doubletake doubletake-ctl doubletake-test-receiver doubletake-release doubletake-ctl-release doubletake-test-receiver-release manpages-release install install-man uninstall test clean
+.PHONY: android android-aar android-release all build doubletake doubletake-ctl doubletake-test-receiver doubletake-release doubletake-ctl-release doubletake-test-receiver-release manpages-release install install-man uninstall test clean
 
 PREFIX ?= /usr/local
 MANDIR ?= $(PREFIX)/share/man
@@ -62,8 +62,12 @@ ANDROID_TARGETS ?= android/arm64,android/amd64
 android-aar:
 	cp go.mod go.mod.bak && cp go.sum go.sum.bak; \
 	go get golang.org/x/mobile/bind && \
-	gomobile bind -target $(ANDROID_TARGETS) -androidapi 29 -javapkg com.doubletake -o android/app/libs/doubletake.aar ./mobile; \
+	gomobile bind -target $(ANDROID_TARGETS) -androidapi 29 -ldflags='-s -w' -javapkg com.doubletake -o android/app/libs/doubletake.aar ./mobile; \
 	rc=$$?; mv go.mod.bak go.mod; mv go.sum.bak go.sum; exit $$rc
 
 android: android-aar
 	cd android && ./gradlew assembleDebug
+
+# Signed, minified APK; needs android/keystore.properties (see README).
+android-release: android-aar
+	cd android && ./gradlew assembleRelease
