@@ -893,8 +893,12 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		if err := connectEvent(); err != nil {
 			return nil, err
 		}
+		// RECORD before the media streams: Apple TVs (tvOS AirTunes/960) accept
+		// the streams either way but play no screen audio if RECORD comes last.
 		if skipRecord {
-			dbg("[SETUP] receiver returned skipRecord=true; RECORD will be skipped after stream setup")
+			dbg("[SETUP] receiver returned skipRecord=true; session was started by control SETUP")
+		} else if err := recordSession(); err != nil {
+			return nil, err
 		}
 	}
 	// Create the audio stream after the control-first probe, or make it the first
@@ -1103,14 +1107,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=64K)", dataAddr)
 
-	// The sender activates the session in its second start stage, after every
-	// transport stream has been set up. A receiver may waive that final RECORD
-	// request with skipRecord, but accepting the control SETUP alone does not
-	// make it safe to activate an otherwise incomplete session.
-	if skipRecord {
-		dbg("[SETUP] receiver returned skipRecord=true; session was started by SETUP")
-	} else if err := recordSession(); err != nil {
-		return nil, err
+	// Legacy receivers prepare the session with their combined audio SETUP and
+	// start it only after both streams exist.
+	if !sessionFirstSetup {
+		if skipRecord {
+			dbg("[SETUP] receiver returned skipRecord=true; session was started by SETUP")
+		} else if err := recordSession(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Only set the receiver's volume when this session actually carries audio.
