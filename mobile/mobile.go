@@ -35,6 +35,7 @@ var (
 	cancel context.CancelFunc
 	source *airplay.StreamSource
 	pcm    *airplay.PCMSource
+	active *airplay.MirrorSession // set once setup completes
 )
 
 // Run connects to the receiver and mirrors until Stop or a stream error.
@@ -57,7 +58,7 @@ func Run(host Host, addr string, port, fps, bitrateKbps int, withAudio bool, cre
 		audio.Close()
 		stop()
 		mu.Lock()
-		cancel, source, pcm = nil, nil, nil
+		cancel, source, pcm, active = nil, nil, nil, nil
 		mu.Unlock()
 	}()
 	log.SetOutput(logWriter{host})
@@ -90,6 +91,26 @@ func PushAudio(pcmData []byte) error {
 		return errors.New("no active session")
 	}
 	return src.Push(pcmData, time.Now())
+}
+
+// SetVolume sets the receiver's volume from a 0..1 fraction (0 mutes).
+// It blocks on a network round trip; don't call it from the UI thread.
+func SetVolume(fraction float64) error {
+	mu.Lock()
+	s := active
+	mu.Unlock()
+	if s == nil {
+		return errors.New("no active session")
+	}
+	return s.SetAudioVolume(volumeDB(fraction))
+}
+
+// volumeDB maps 0..1 onto AirPlay's -30..0 dB range, with 0 as mute (-144).
+func volumeDB(fraction float64) float64 {
+	if fraction <= 0 {
+		return -144
+	}
+	return -30 * (1 - min(fraction, 1))
 }
 
 // SetDebug enables verbose protocol logging (sent to Host.Log).
@@ -249,6 +270,9 @@ func run(ctx context.Context, host Host, src *airplay.StreamSource, audio *airpl
 	}
 	defer session.Close()
 	log.Printf("mirror session ready (data port %d)", session.DataPort)
+	mu.Lock()
+	active = session
+	mu.Unlock()
 
 	capture := src.AsCapture()
 	go func() { <-ctx.Done(); capture.Stop(); session.Close() }()

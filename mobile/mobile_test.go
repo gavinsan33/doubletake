@@ -76,6 +76,13 @@ func TestRunMirrorsToReceiver(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+	before := srv.Stats().ParameterRequests
+	if err := SetVolume(0.5); err != nil {
+		t.Fatalf("SetVolume: %v", err)
+	}
+	if srv.Stats().ParameterRequests == before {
+		t.Fatal("SetVolume sent no SET_PARAMETER")
+	}
 	Stop()
 	if err := <-done; err != nil {
 		t.Fatalf("Run: %v", err)
@@ -84,4 +91,12 @@ func TestRunMirrorsToReceiver(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 	t.Logf("encoder requested at %dx%d", host.w, host.h)
+}
+
+func TestVolumeDB(t *testing.T) {
+	for _, c := range []struct{ in, want float64 }{{0, -144}, {-1, -144}, {0.5, -15}, {1, 0}, {2, 0}} {
+		if got := volumeDB(c.in); got != c.want {
+			t.Errorf("volumeDB(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
 }
