@@ -1,14 +1,21 @@
 package com.doubletake.app
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioPlaybackCaptureConfiguration
+import android.media.AudioManager
+import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -31,6 +38,8 @@ class MirrorService : Service(), Host {
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var codec: MediaCodec? = null
+    private var audioRecord: AudioRecord? = null
+    private var savedVolume = -1 // phone media volume to restore, -1 = untouched
     private var dm: DisplayManager? = null
     private var canvasW = 0
     private var canvasH = 0
@@ -69,9 +78,10 @@ class MirrorService : Service(), Host {
             override fun onStop() = Mobile.stop()
         }, null)
 
+        Mobile.setDebug(applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
         thread(name = "doubletake-session") {
             val err = try {
-                Mobile.run(this, host, port.toLong(), FPS.toLong(), BITRATE_KBPS.toLong(),
+                Mobile.run(this, host, port.toLong(), FPS.toLong(), BITRATE_KBPS.toLong(), true,
                     File(filesDir, "creds").apply { mkdirs() }.path, "")
                 null
             } catch (e: Exception) {
@@ -93,6 +103,50 @@ class MirrorService : Service(), Host {
     }
 
     override fun requestCode(prompt: String): String = MainActivity.ask(prompt)
+
+    /** Captures other apps' media audio (apps may opt out) as 44.1 kHz stereo PCM for the Go side. */
+    override fun startAudio() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            error("microphone permission not granted (needed to capture app audio)")
+        }
+        val proj = projection ?: error("no projection")
+        val capture = AudioPlaybackCaptureConfiguration.Builder(proj)
+            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+            .addMatchingUsage(AudioAttributes.USAGE_GAME)
+            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+            .build()
+        val format = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(44100)
+            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+            .build()
+        val min = AudioRecord.getMinBufferSize(44100, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
+        val rec = AudioRecord.Builder()
+            .setAudioFormat(format)
+            .setAudioPlaybackCaptureConfig(capture)
+            .setBufferSizeInBytes(maxOf(min, 44100 * 4 / 5)) // >= 200 ms
+            .build()
+        rec.startRecording()
+        audioRecord = rec
+        // Capture is taken before the volume stage, so silencing the phone leaves the TV unaffected.
+        // Set the level rather than ADJUST_MUTE, which some OEM builds ignore.
+        val am = getSystemService(AudioManager::class.java)
+        savedVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+        Log.i(TAG, "phone media volume $savedVolume -> ${am.getStreamVolume(AudioManager.STREAM_MUSIC)}")
+        thread(name = "doubletake-audio") {
+            val buf = ByteArray(441 * 4) // 10 ms
+            try {
+                while (audioRecord === rec) {
+                    val n = rec.read(buf, 0, buf.size) and 3.inv() // whole stereo frames
+                    if (n <= 0) break
+                    Mobile.pushAudio(buf.copyOf(n))
+                }
+            } catch (e: Exception) {
+                Log.i(TAG, "audio pump ended: $e")
+            }
+        }
+    }
 
     override fun startEncoder(width: Long, height: Long) {
         val proj = projection ?: error("no projection")
@@ -193,6 +247,11 @@ class MirrorService : Service(), Host {
     }
 
     private fun releaseCapture() {
+        audioRecord?.let { audioRecord = null; runCatching { it.stop() }; it.release() }
+        if (savedVolume >= 0) {
+            getSystemService(AudioManager::class.java).setStreamVolume(AudioManager.STREAM_MUSIC, savedVolume, 0)
+            savedVolume = -1
+        }
         dm?.unregisterDisplayListener(displayListener); dm = null
         display?.release(); display = null
         runCatching { codec?.stop() }; runCatching { codec?.release() }; codec = null

@@ -56,7 +56,7 @@ class MainActivity : Activity() {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         instance = this
-        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 0)
+        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS, android.Manifest.permission.RECORD_AUDIO), 0)
 
         statusView = TextView(this).apply { text = "Pick a receiver"; setPadding(32, 32, 32, 16) }
         adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, targets)

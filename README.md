@@ -332,7 +332,7 @@ share the encoder. Other canvas groups continue independently as well.
 An Android sender lives in [android/](android/). The AirPlay protocol code is this
 repo's Go code, exposed through `gomobile` ([mobile/](mobile/)); the app only does
 screen capture (MediaProjection) and H.264 encoding (MediaCodec). Android 10+.
-Currently video-only; audio and HEVC are not wired up yet.
+Mirrors H.264 video and ALAC audio (other apps' media audio; apps can opt out of capture). HEVC and AAC-ELD are not wired up.
 
 ```sh
 go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init
