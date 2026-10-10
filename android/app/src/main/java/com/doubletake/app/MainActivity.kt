@@ -1,6 +1,7 @@
 package com.doubletake.app
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.net.nsd.NsdManager
@@ -116,10 +117,27 @@ class MainActivity : ComponentActivity() {
         nsd = getSystemService(NsdManager::class.java)
         nsd.discoverServices("_airplay._tcp", NsdManager.PROTOCOL_DNS_SD, discovery)
         setContent { DoubletakeTheme { Screen(::begin, ::stop) } }
+        if (b == null) quickConnect(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        quickConnect(intent)
+    }
+
+    /** From the Quick Settings tile: reconnect to the last receiver unless already busy. */
+    private fun quickConnect(intent: Intent) {
+        if (!intent.getBooleanExtra(EXTRA_QUICK_CONNECT, false)) return
+        intent.removeExtra(EXTRA_QUICK_CONNECT)
+        if (Ui.session is Session.Connecting || Ui.session is Session.Mirroring) return
+        lastReceiver(this)?.let(::begin)
     }
 
     private fun begin(target: Receiver) {
         pending = target
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString("name", target.name).putString("host", target.host).putInt("port", target.port)
+            .apply()
         Ui.volume = 1f // mirroring setup puts the TV at full volume
         Ui.session = Session.Connecting(target.name)
         capture.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
@@ -132,6 +150,17 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         runCatching { nsd.stopServiceDiscovery(discovery) }
         super.onDestroy()
+    }
+
+    companion object {
+        const val EXTRA_QUICK_CONNECT = "quickConnect"
+        private const val PREFS = "lastReceiver"
+
+        fun lastReceiver(context: Context): Receiver? {
+            val p = context.getSharedPreferences(PREFS, MODE_PRIVATE)
+            val host = p.getString("host", null) ?: return null
+            return Receiver(p.getString("name", host)!!, host, p.getInt("port", 7000))
+        }
     }
 }
 

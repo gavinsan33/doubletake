@@ -105,6 +105,7 @@ class MirrorService : Service(), Host {
             Ui.post {
                 // A cancelled code prompt is the user's choice, not a failure.
                 Ui.session = if (message == null || message == "cancelled") Session.Idle else Session.Failed(friendly(message))
+                MirrorTileService.refresh(this)
             }
             releaseCapture()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -196,7 +197,7 @@ class MirrorService : Service(), Host {
         display = proj.createVirtualDisplay("doubletake", w, h, resources.displayMetrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, enc.second, null, null)
         encW = w; encH = h
-        Ui.post { Ui.session = Session.Mirroring(name) }
+        Ui.post { Ui.session = Session.Mirroring(name); MirrorTileService.refresh(this) }
         // Rotation or folding changes the screen's aspect; follow it.
         dm = getSystemService(DisplayManager::class.java).also { it.registerDisplayListener(displayListener, null) }
     }
