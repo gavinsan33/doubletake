@@ -327,6 +327,19 @@ Fan-out uses a bounded queue per target within each group. A
 stalled target is detached when its queue fills, without blocking peers that
 share the encoder. Other canvas groups continue independently as well.
 
+## Android
+
+An Android sender lives in [android/](android/). The AirPlay protocol code is this
+repo's Go code, exposed through `gomobile` ([mobile/](mobile/)); the app only does
+screen capture (MediaProjection) and H.264 encoding (MediaCodec). Android 10+.
+Currently video-only; audio and HEVC are not wired up yet.
+
+```sh
+go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init
+export ANDROID_HOME=... JAVA_HOME=...   # SDK with NDK, JDK 17+
+make android                             # android/app/build/outputs/apk/debug/app-debug.apk
+```
+
 ## Disclaimer
 
 The majority of code for this project was written by LLMs. I've read through the code to make sure there's nothing obviously stupid, but if you're in a production or security-sensitive environment and need to use AirPlay (for whatever reason), do not use this project.
