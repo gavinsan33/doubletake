@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,10 @@ type StreamSource struct {
 	ch   chan VideoAccessUnit
 	done chan struct{}
 	once sync.Once
+	// started is set by the first read. Until then nothing can be sent, and
+	// frames before the first IDR are discarded anyway, so a full queue (the
+	// encoder runs during the rest of SETUP) sheds old frames instead of failing.
+	started atomic.Bool
 }
 
 func NewStreamSource() *StreamSource {
@@ -33,17 +38,27 @@ func (s *StreamSource) Push(annexB []byte, pts time.Time) error {
 		return io.ErrClosedPipe
 	default:
 	}
-	select {
-	case s.ch <- VideoAccessUnit{AnnexB: annexB, PTS: pts}:
-		return nil
-	default:
-		return errStreamSourceBacklog
+	au := VideoAccessUnit{AnnexB: annexB, PTS: pts}
+	for {
+		select {
+		case s.ch <- au:
+			return nil
+		default:
+		}
+		if s.started.Load() {
+			return errStreamSourceBacklog
+		}
+		select { // not streaming yet: drop the oldest
+		case <-s.ch:
+		default:
+		}
 	}
 }
 
 func (s *StreamSource) Close() { s.once.Do(func() { close(s.done) }) }
 
 func (s *StreamSource) ReadVideoAccessUnit() (VideoAccessUnit, error) {
+	s.started.Store(true)
 	select {
 	case au := <-s.ch:
 		return au, nil

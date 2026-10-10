@@ -7,6 +7,20 @@ import (
 	"time"
 )
 
+func TestStreamSourceShedsBeforeStart(t *testing.T) {
+	s := NewStreamSource()
+	pts := time.Now()
+	for i := 0; i < streamSourceQueue+10; i++ {
+		if err := s.Push([]byte{byte(i)}, pts); err != nil {
+			t.Fatalf("push %d before start: %v", i, err)
+		}
+	}
+	au, _ := s.ReadVideoAccessUnit()
+	if au.AnnexB[0] != 10 { // oldest 10 were shed
+		t.Fatalf("first surviving frame = %d, want 10", au.AnnexB[0])
+	}
+}
+
 func TestStreamSource(t *testing.T) {
 	s := NewStreamSource()
 	pts := time.Now()
