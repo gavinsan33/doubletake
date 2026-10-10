@@ -1,38 +1,92 @@
 package com.doubletake.app
 
-import android.app.Activity
-import android.app.AlertDialog
+import android.Manifest
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.text.InputType
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ListView
-import android.widget.SeekBar
-import android.widget.TextView
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.TimeUnit
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LargeTopAppBar
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.dp
 
-private const val REQ_CAPTURE = 1
-
-class MainActivity : Activity() {
-    private class Target(val name: String, val host: String, val port: Int) {
-        override fun toString() = "$name  ($host)"
-    }
-
-    private val targets = mutableListOf<Target>()
-    private lateinit var adapter: ArrayAdapter<Target>
-    private lateinit var statusView: TextView
-    private lateinit var volume: SeekBar
+class MainActivity : ComponentActivity() {
     private lateinit var nsd: NsdManager
-    private var pending: Target? = null
+    private var pending: Receiver? = null
+
+    private val capture = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val target = pending
+        val grant = result.data
+        if (target == null || result.resultCode != RESULT_OK || grant == null) {
+            Ui.session = Session.Idle
+            return@registerForActivityResult
+        }
+        startForegroundService(Intent(this, MirrorService::class.java)
+            .putExtra(MirrorService.EXTRA_HOST, target.host)
+            .putExtra(MirrorService.EXTRA_PORT, target.port)
+            .putExtra(MirrorService.EXTRA_NAME, target.name)
+            .putExtra(MirrorService.EXTRA_RESULT_CODE, result.resultCode)
+            .putExtra(MirrorService.EXTRA_GRANT, grant))
+    }
 
     private val discovery = object : NsdManager.DiscoveryListener {
         override fun onServiceFound(s: NsdServiceInfo) {
@@ -41,8 +95,8 @@ class MainActivity : Activity() {
                 override fun onServiceResolved(r: NsdServiceInfo) {
                     @Suppress("DEPRECATION")
                     val host = r.host?.hostAddress ?: return
-                    runOnUiThread {
-                        if (targets.none { it.host == host }) adapter.add(Target(r.serviceName, host, r.port))
+                    Ui.post {
+                        if (Ui.receivers.none { it.host == host }) Ui.receivers.add(Receiver(r.serviceName, host, r.port))
                     }
                 }
                 override fun onResolveFailed(s: NsdServiceInfo, code: Int) {}
@@ -56,97 +110,203 @@ class MainActivity : Activity() {
     }
 
     override fun onCreate(b: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(b)
-        instance = this
-        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS, android.Manifest.permission.RECORD_AUDIO), 0)
-
-        statusView = TextView(this).apply { text = "Pick a receiver"; setPadding(32, 32, 32, 16) }
-        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, targets)
-        val list = ListView(this).apply {
-            adapter = this@MainActivity.adapter
-            setOnItemClickListener { _, _, i, _ -> begin(targets[i]) }
-        }
-        val manual = EditText(this).apply { hint = "…or enter an IP address" ; inputType = InputType.TYPE_CLASS_PHONE }
-        val go = Button(this).apply {
-            text = "Connect"
-            setOnClickListener { manual.text.toString().trim().takeIf { it.isNotEmpty() }?.let { begin(Target(it, it, 7000)) } }
-        }
-        val volumeLabel = TextView(this).apply { text = "TV volume"; setPadding(32, 16, 32, 0) }
-        volume = SeekBar(this).apply {
-            max = 100
-            progress = 100 // mirroring setup puts the TV at full volume
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
-                    if (fromUser) MirrorService.setTvVolume(value / 100.0)
-                }
-                override fun onStartTrackingTouch(bar: SeekBar) {}
-                override fun onStopTrackingTouch(bar: SeekBar) {}
-            })
-        }
-        val stop = Button(this).apply {
-            text = "Stop"
-            setOnClickListener { startService(Intent(context, MirrorService::class.java).setAction(MirrorService.ACTION_STOP)) }
-        }
-        setContentView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(statusView); addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-            addView(manual); addView(go); addView(stop)
-            addView(volumeLabel); addView(volume)
-        })
-
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.RECORD_AUDIO), 0)
         nsd = getSystemService(NsdManager::class.java)
         nsd.discoverServices("_airplay._tcp", NsdManager.PROTOCOL_DNS_SD, discovery)
+        setContent { DoubletakeTheme { Screen(::begin, ::stop) } }
     }
 
-    private fun begin(t: Target) {
-        pending = t
-        volume.progress = 100
-        statusView.text = "Connecting to ${t.name}…"
-        startActivityForResult(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent(), REQ_CAPTURE)
+    private fun begin(target: Receiver) {
+        pending = target
+        Ui.volume = 1f // mirroring setup puts the TV at full volume
+        Ui.session = Session.Connecting(target.name)
+        capture.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(req: Int, result: Int, data: Intent?) {
-        val t = pending
-        if (req != REQ_CAPTURE || t == null || result != RESULT_OK || data == null) {
-            statusView.text = "Screen capture not allowed"
-            return
-        }
-        startForegroundService(Intent(this, MirrorService::class.java)
-            .putExtra(MirrorService.EXTRA_HOST, t.host)
-            .putExtra(MirrorService.EXTRA_PORT, t.port)
-            .putExtra(MirrorService.EXTRA_RESULT_CODE, result)
-            .putExtra(MirrorService.EXTRA_GRANT, data))
+    private fun stop() {
+        startService(Intent(this, MirrorService::class.java).setAction(MirrorService.ACTION_STOP))
     }
 
     override fun onDestroy() {
-        if (instance === this) instance = null
         runCatching { nsd.stopServiceDiscovery(discovery) }
         super.onDestroy()
     }
+}
 
-    companion object {
-        private var instance: MainActivity? = null
-        private val ui = Handler(Looper.getMainLooper())
+@Composable
+private fun DoubletakeTheme(content: @Composable () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    val context = LocalContext.current
+    val colors = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+            if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        dark -> darkColorScheme()
+        else -> lightColorScheme()
+    }
+    MaterialTheme(colorScheme = colors, content = content)
+}
 
-        fun status(msg: String) {
-            ui.post { instance?.statusView?.text = msg }
-        }
-
-        /** Blocks the calling (Go) thread until the user answers. "" = cancelled. */
-        fun ask(prompt: String): String {
-            val answer = SynchronousQueue<String>()
-            ui.post {
-                val a = instance
-                if (a == null) { answer.offer(""); return@post }
-                val input = EditText(a).apply { inputType = InputType.TYPE_CLASS_TEXT }
-                AlertDialog.Builder(a).setTitle(prompt).setView(input)
-                    .setPositiveButton("OK") { _, _ -> answer.offer(input.text.toString()) }
-                    .setNegativeButton("Cancel") { _, _ -> answer.offer("") }
-                    .setOnCancelListener { answer.offer("") }
-                    .show()
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun Screen(onConnect: (Receiver) -> Unit, onStop: () -> Unit) {
+    val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val session = Ui.session
+    val busy = session is Session.Connecting || session is Session.Mirroring
+    Scaffold(
+        modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
+        topBar = { LargeTopAppBar(title = { Text("Doubletake") }, scrollBehavior = scroll) },
+    ) { insets ->
+        LazyColumn(
+            contentPadding = PaddingValues(
+                start = 16.dp, end = 16.dp,
+                top = insets.calculateTopPadding(), bottom = insets.calculateBottomPadding() + 24.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            when (session) {
+                is Session.Connecting -> item { SessionCard(session.name, connecting = true, onStop) }
+                is Session.Mirroring -> item { SessionCard(session.name, connecting = false, onStop) }
+                is Session.Failed -> item { ErrorCard(session.message) }
+                Session.Idle -> {}
             }
-            return answer.poll(2, TimeUnit.MINUTES) ?: ""
+            item { SectionHeader("AirPlay receivers", searching = Ui.receivers.isEmpty()) }
+            if (Ui.receivers.isEmpty()) {
+                item {
+                    Text(
+                        "Looking for Apple TVs and other AirPlay receivers on this Wi-Fi network…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                }
+            }
+            items(Ui.receivers, key = { it.host }) { r -> ReceiverRow(r, enabled = !busy) { onConnect(r) } }
+            item { ManualEntry(enabled = !busy, onConnect) }
+            item {
+                Text(
+                    "Audio from other apps plays on the TV and your phone stays muted while mirroring. " +
+                        "Some apps block audio capture.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                )
+            }
         }
     }
+    Ui.prompt?.let { CodeDialog(it) }
+}
+
+@Composable
+private fun SessionCard(name: String, connecting: Boolean, onStop: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (connecting) {
+                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+                } else {
+                    Icon(Icons.Default.CastConnected, contentDescription = null)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(if (connecting) "Connecting…" else "Mirroring", style = MaterialTheme.typography.labelLarge)
+                    Text(name, style = MaterialTheme.typography.titleLarge)
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.AutoMirrored.Filled.VolumeDown, contentDescription = "TV volume down")
+                Slider(
+                    value = Ui.volume,
+                    onValueChange = { Ui.volume = it; MirrorService.setTvVolume(it.toDouble()) },
+                    enabled = !connecting,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                )
+                Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "TV volume up")
+            }
+            Button(
+                onClick = onStop,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (connecting) "Cancel" else "Stop mirroring") }
+        }
+    }
+}
+
+@Composable
+private fun ErrorCard(message: String) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.ErrorOutline, contentDescription = null)
+            Spacer(Modifier.width(12.dp))
+            Text(message, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(text: String, searching: Boolean) {
+    Row(Modifier.padding(start = 4.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(text, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+        if (searching) {
+            Spacer(Modifier.width(8.dp))
+            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+        }
+    }
+}
+
+@Composable
+private fun ReceiverRow(r: Receiver, enabled: Boolean, onClick: () -> Unit) {
+    Card(onClick = onClick, enabled = enabled) {
+        ListItem(
+            headlineContent = { Text(r.name) },
+            supportingContent = { Text(r.host) },
+            leadingContent = { Icon(Icons.Default.Tv, contentDescription = null) },
+            colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        )
+    }
+}
+
+@Composable
+private fun ManualEntry(enabled: Boolean, onConnect: (Receiver) -> Unit) {
+    var ip by rememberSaveable { mutableStateOf("") }
+    val go = { ip.trim().takeIf { it.isNotEmpty() }?.let { onConnect(Receiver(it, it, 7000)) } }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = ip,
+            onValueChange = { ip = it },
+            label = { Text("Or enter an IP address") },
+            singleLine = true,
+            enabled = enabled,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+            keyboardActions = KeyboardActions(onGo = { go() }),
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        TextButton(onClick = { go() }, enabled = enabled && ip.isNotBlank()) { Text("Connect") }
+    }
+}
+
+@Composable
+private fun CodeDialog(prompt: CodePrompt) {
+    var value by remember(prompt) { mutableStateOf("") }
+    val pin = "PIN" in prompt.text
+    AlertDialog(
+        onDismissRequest = { prompt.reply("") },
+        title = { Text(if (pin) "Enter PIN" else "Enter password") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(prompt.text)
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it },
+                    singleLine = true,
+                    visualTransformation = if (pin) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = if (pin) KeyboardType.NumberPassword else KeyboardType.Password),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { prompt.reply(value) }, enabled = value.isNotEmpty()) { Text("OK") } },
+        dismissButton = { TextButton(onClick = { prompt.reply("") }) { Text("Cancel") } },
+    )
 }

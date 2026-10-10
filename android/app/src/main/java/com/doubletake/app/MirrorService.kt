@@ -40,6 +40,7 @@ private const val BITRATE_KBPS = 6000
 /** Foreground service: owns MediaProjection + MediaCodec and runs the Go session. */
 class MirrorService : Service(), Host {
     private var projection: MediaProjection? = null
+    private var name = ""
     private var display: VirtualDisplay? = null
     private var codec: MediaCodec? = null
     private var audioRecord: AudioRecord? = null
@@ -60,6 +61,7 @@ class MirrorService : Service(), Host {
         }
         val host = intent?.getStringExtra(EXTRA_HOST) ?: return START_NOT_STICKY
         val port = intent.getIntExtra(EXTRA_PORT, 7000)
+        name = intent.getStringExtra(EXTRA_NAME) ?: host
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         @Suppress("DEPRECATION")
         val grant = intent.getParcelableExtra<Intent>(EXTRA_GRANT) ?: return START_NOT_STICKY
@@ -70,9 +72,15 @@ class MirrorService : Service(), Host {
             this, 0, Intent(this, MirrorService::class.java).setAction(ACTION_STOP),
             android.app.PendingIntent.FLAG_IMMUTABLE,
         )
+        val open = android.app.PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
         val note = Notification.Builder(this, "mirror")
-            .setSmallIcon(android.R.drawable.ic_menu_share)
-            .setContentTitle("Mirroring to $host")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Mirroring to $name")
+            .setContentText("Tap to adjust TV volume or stop")
+            .setContentIntent(open)
+            .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
             .build()
         startForeground(1, note, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
@@ -93,7 +101,11 @@ class MirrorService : Service(), Host {
                 e
             }
             Log.i(TAG, "session ended: $err")
-            MainActivity.status(if (err == null) "Stopped" else "Error: ${err.message}")
+            val message = err?.message
+            Ui.post {
+                // A cancelled code prompt is the user's choice, not a failure.
+                Ui.session = if (message == null || message == "cancelled") Session.Idle else Session.Failed(friendly(message))
+            }
             releaseCapture()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -107,7 +119,14 @@ class MirrorService : Service(), Host {
         Log.d(TAG, msg.trimEnd())
     }
 
-    override fun requestCode(prompt: String): String = MainActivity.ask(prompt)
+    override fun requestCode(prompt: String): String = Ui.ask(prompt)
+
+    private fun friendly(message: String) = when {
+        "connect" in message -> "Couldn't reach $name. Check that it's on and on the same Wi-Fi network."
+        "pairing" in message -> "Pairing with $name failed. Check the PIN or password and try again."
+        "closed" in message || "EOF" in message -> "$name ended the mirroring session."
+        else -> "Mirroring to $name stopped: $message"
+    }
 
     /** Captures other apps' media audio (apps may opt out) as 44.1 kHz stereo PCM for the Go side. */
     override fun startAudio() {
@@ -177,6 +196,7 @@ class MirrorService : Service(), Host {
         display = proj.createVirtualDisplay("doubletake", w, h, resources.displayMetrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, enc.second, null, null)
         encW = w; encH = h
+        Ui.post { Ui.session = Session.Mirroring(name) }
         // Rotation or folding changes the screen's aspect; follow it.
         dm = getSystemService(DisplayManager::class.java).also { it.registerDisplayListener(displayListener, null) }
     }
@@ -303,6 +323,7 @@ class MirrorService : Service(), Host {
         const val ACTION_STOP = "com.doubletake.app.STOP"
         const val EXTRA_HOST = "host"
         const val EXTRA_PORT = "port"
+        const val EXTRA_NAME = "name"
         const val EXTRA_RESULT_CODE = "resultCode"
         const val EXTRA_GRANT = "grant"
     }

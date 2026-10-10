@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window chrome only; Compose draws the UI with Material 3. -->
+    <style name="Theme.Doubletake" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+    <color name="ic_launcher_background">#3B5BDB</color>
+</resources>
