@@ -36,6 +36,15 @@ func (f *fakeHost) StartEncoder(w, h int) error {
 	close(f.started)
 	return nil
 }
+func (f *fakeHost) StartAudio() error {
+	go func() {
+		chunk := make([]byte, 441*4) // 10 ms of silence
+		for PushAudio(chunk) == nil {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	return nil
+}
 func (f *fakeHost) RequestCode(string) string { return "" }
 func (f *fakeHost) Log(msg string)            { f.t.Log(msg) }
 
@@ -55,10 +64,10 @@ func TestRunMirrorsToReceiver(t *testing.T) {
 
 	host := &fakeHost{t: t, started: make(chan struct{})}
 	done := make(chan error, 1)
-	go func() { done <- Run(host, "127.0.0.1", port, 30, 4000, t.TempDir(), "") }()
+	go func() { done <- Run(host, "127.0.0.1", port, 30, 4000, true, t.TempDir(), "") }()
 
 	deadline := time.After(20 * time.Second)
-	for srv.Stats().VideoPackets < 5 {
+	for st := srv.Stats(); st.VideoPackets < 5 || st.AudioPackets < 5; st = srv.Stats() {
 		select {
 		case err := <-done:
 			t.Fatalf("Run ended early: %v (stats %+v)", err, srv.Stats())

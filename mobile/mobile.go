@@ -20,6 +20,10 @@ type Host interface {
 	// StartEncoder is called mid-SETUP with the canvas the receiver wants.
 	// After it returns, the app pushes access units with PushFrame.
 	StartEncoder(width, height int) error
+	// StartAudio is called once the receiver has accepted an audio stream. The
+	// app then pushes 44.1 kHz stereo S16LE PCM with PushAudio. An error is
+	// logged and mirroring continues without audio.
+	StartAudio() error
 	// RequestCode asks the user for the on-screen PIN or the receiver's
 	// configured password. Return "" to cancel.
 	RequestCode(prompt string) string
@@ -30,12 +34,13 @@ var (
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	source *airplay.StreamSource
+	pcm    *airplay.PCMSource
 )
 
 // Run connects to the receiver and mirrors until Stop or a stream error.
 // It blocks; call it from a worker thread. credsDir persists pairing keys.
 // ponytail: one session per process, enough for a phone.
-func Run(host Host, addr string, port, fps, bitrateKbps int, credsDir, code string) error {
+func Run(host Host, addr string, port, fps, bitrateKbps int, withAudio bool, credsDir, code string) error {
 	ctx, stop := context.WithCancel(context.Background())
 	src := airplay.NewStreamSource()
 	mu.Lock()
@@ -44,17 +49,19 @@ func Run(host Host, addr string, port, fps, bitrateKbps int, credsDir, code stri
 		stop()
 		return errors.New("a session is already running")
 	}
-	cancel, source = stop, src
+	audio := airplay.NewPCMSource()
+	cancel, source, pcm = stop, src, audio
 	mu.Unlock()
 	defer func() {
 		src.Close()
+		audio.Close()
 		stop()
 		mu.Lock()
-		cancel, source = nil, nil
+		cancel, source, pcm = nil, nil, nil
 		mu.Unlock()
 	}()
 	log.SetOutput(logWriter{host})
-	return run(ctx, host, src, addr, port, fps, bitrateKbps, credsDir, code)
+	return run(ctx, host, src, audio, withAudio, addr, port, fps, bitrateKbps, credsDir, code)
 }
 
 type logWriter struct{ h Host }
@@ -73,6 +80,21 @@ func PushFrame(annexB []byte) error {
 	return src.Push(annexB, time.Now())
 }
 
+// PushAudio queues interleaved 44.1 kHz stereo S16LE PCM (whole sample frames).
+// Calls before the session accepts audio are ignored.
+func PushAudio(pcmData []byte) error {
+	mu.Lock()
+	src := pcm
+	mu.Unlock()
+	if src == nil {
+		return errors.New("no active session")
+	}
+	return src.Push(pcmData, time.Now())
+}
+
+// SetDebug enables verbose protocol logging (sent to Host.Log).
+func SetDebug(enabled bool) { airplay.SetDebugMode(enabled) }
+
 // Stop ends the running session, if any.
 func Stop() {
 	mu.Lock()
@@ -82,7 +104,7 @@ func Stop() {
 	}
 }
 
-func run(ctx context.Context, host Host, src *airplay.StreamSource, addr string, port, fps, bitrateKbps int, credsDir, code string) error {
+func run(ctx context.Context, host Host, src *airplay.StreamSource, audio *airplay.PCMSource, withAudio bool, addr string, port, fps, bitrateKbps int, credsDir, code string) error {
 	newClient := func() (*airplay.AirPlayClient, error) {
 		c := airplay.NewAirPlayClient(addr, port)
 		c.SetPassword(code)
@@ -200,8 +222,8 @@ func run(ctx context.Context, host Host, src *airplay.StreamSource, addr string,
 		}
 	}
 
-	// ponytail: H.264 only, no audio; add HEVC/audio when the encoder side supports them.
-	cfg := airplay.StreamConfig{FPS: fps, Bitrate: bitrateKbps, VideoCodec: airplay.VideoCodecH264, NoAudio: true}
+	// ponytail: H.264 and ALAC only; add HEVC/AAC-ELD when the platform encoders support them.
+	cfg := airplay.StreamConfig{FPS: fps, Bitrate: bitrateKbps, VideoCodec: airplay.VideoCodecH264, NoAudio: !withAudio}
 	started := false
 	prepare := func(w, h int, codec airplay.VideoCodec) (airplay.VideoPreparationResult, error) {
 		if !started {
@@ -230,8 +252,29 @@ func run(ctx context.Context, host Host, src *airplay.StreamSource, addr string,
 
 	capture := src.AsCapture()
 	go func() { <-ctx.Done(); capture.Stop(); session.Close() }()
+	if withAudio && session.HasAudio() {
+		startAudio(ctx, host, session, audio)
+	}
+	log.Print("streaming video")
 	if err := session.StreamFrames(ctx, capture, 0); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("streaming: %w", err)
 	}
 	return nil
+}
+
+func startAudio(ctx context.Context, host Host, session *airplay.MirrorSession, audio *airplay.PCMSource) {
+	ac, err := airplay.NewPCMAudioCapture(audio, session.AudioCodec())
+	if err == nil {
+		err = host.StartAudio()
+	}
+	if err != nil {
+		log.Printf("audio disabled: %v", err)
+		return
+	}
+	go func() {
+		defer ac.Stop()
+		if err := session.StreamAudio(ctx, ac, session.AudioStream()); err != nil && ctx.Err() == nil {
+			log.Printf("audio streaming error: %v", err)
+		}
+	}()
 }
