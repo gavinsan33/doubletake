@@ -2434,6 +2434,19 @@ func (s *MirrorSession) SetAudioMuted(muted bool) error {
 	return nil
 }
 
+// SetAudioVolume sets mirrored audio volume on the receiver in AirPlay dB:
+// 0 is full scale, -30 the quietest audible level, and -144 mutes.
+func (s *MirrorSession) SetAudioVolume(db float64) error {
+	if s == nil || s.client == nil || s.sessionURI == "" || s.noAudio {
+		return fmt.Errorf("audio control unavailable")
+	}
+	body := fmt.Appendf(nil, "volume: %f\r\n", db)
+	if _, _, err := s.client.rtspRequest("SET_PARAMETER", s.sessionURI, "text/parameters", body, nil); err != nil {
+		return fmt.Errorf("set audio volume %.1f dB: %w", db, err)
+	}
+	return nil
+}
+
 func audioVolumeBody(muted bool) []byte {
 	if muted {
 		return []byte("volume: -144.000000\r\n")
