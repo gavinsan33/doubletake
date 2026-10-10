@@ -26,7 +26,11 @@ import android.util.Log
 import android.view.WindowManager
 import com.doubletake.mobile.Host
 import com.doubletake.mobile.Mobile
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 private const val TAG = "doubletake"
@@ -40,6 +44,7 @@ class MirrorService : Service(), Host {
     private var codec: MediaCodec? = null
     private var audioRecord: AudioRecord? = null
     private var savedVolume = -1 // phone media volume to restore, -1 = untouched
+    private var volumeReceiver: BroadcastReceiver? = null
     private var dm: DisplayManager? = null
     private var canvasW = 0
     private var canvasH = 0
@@ -128,11 +133,11 @@ class MirrorService : Service(), Host {
             .build()
         rec.startRecording()
         audioRecord = rec
-        // Capture is taken before the volume stage, so silencing the phone leaves the TV unaffected.
+        // Capture is taken before the volume stage, so turning the phone down leaves the TV unaffected.
         // Set the level rather than ADJUST_MUTE, which some OEM builds ignore.
         val am = getSystemService(AudioManager::class.java)
         savedVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-        am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+        startVolumeControl(am)
         Log.i(TAG, "phone media volume $savedVolume -> ${am.getStreamVolume(AudioManager.STREAM_MUSIC)}")
         thread(name = "doubletake-audio") {
             val buf = ByteArray(441 * 4) // 10 ms
@@ -145,6 +150,22 @@ class MirrorService : Service(), Host {
             } catch (e: Exception) {
                 Log.i(TAG, "audio pump ended: $e")
             }
+        }
+    }
+
+    /**
+     * Keep the phone silent while audio mirrors: its media volume is held at 0 (TV volume is
+     * the in-app slider), so a volume key that raises it is undone immediately.
+     */
+    private fun startVolumeControl(am: AudioManager) {
+        am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+        volumeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (am.getStreamVolume(AudioManager.STREAM_MUSIC) != 0) am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+            }
+        }.also {
+            // Not a public constant, but long-stable and immediate (Settings persistence lags ~0.5 s).
+            registerReceiver(it, IntentFilter("android.media.VOLUME_CHANGED_ACTION"), RECEIVER_NOT_EXPORTED)
         }
     }
 
@@ -248,6 +269,7 @@ class MirrorService : Service(), Host {
 
     private fun releaseCapture() {
         audioRecord?.let { audioRecord = null; runCatching { it.stop() }; it.release() }
+        volumeReceiver?.let { unregisterReceiver(it); volumeReceiver = null }
         if (savedVolume >= 0) {
             getSystemService(AudioManager::class.java).setStreamVolume(AudioManager.STREAM_MUSIC, savedVolume, 0)
             savedVolume = -1
@@ -264,6 +286,20 @@ class MirrorService : Service(), Host {
     }
 
     companion object {
+        private val volumeSender = Executors.newSingleThreadExecutor() // RTSP round trips
+        private val volumeQueued = AtomicBoolean(false)
+        @Volatile private var volumeWanted = 1.0
+
+        /** Sets the TV volume (0..1, 0 mutes). Slider drags coalesce to the latest value. */
+        fun setTvVolume(fraction: Double) {
+            volumeWanted = fraction
+            if (volumeQueued.getAndSet(true)) return
+            volumeSender.execute {
+                volumeQueued.set(false)
+                runCatching { Mobile.setVolume(volumeWanted) }.onFailure { Log.i(TAG, "set TV volume: $it") }
+            }
+        }
+
         const val ACTION_STOP = "com.doubletake.app.STOP"
         const val EXTRA_HOST = "host"
         const val EXTRA_PORT = "port"

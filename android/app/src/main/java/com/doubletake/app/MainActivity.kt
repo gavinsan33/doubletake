@@ -15,6 +15,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.SeekBar
 import android.widget.TextView
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.TimeUnit
@@ -29,6 +30,7 @@ class MainActivity : Activity() {
     private val targets = mutableListOf<Target>()
     private lateinit var adapter: ArrayAdapter<Target>
     private lateinit var statusView: TextView
+    private lateinit var volume: SeekBar
     private lateinit var nsd: NsdManager
     private var pending: Target? = null
 
@@ -69,6 +71,18 @@ class MainActivity : Activity() {
             text = "Connect"
             setOnClickListener { manual.text.toString().trim().takeIf { it.isNotEmpty() }?.let { begin(Target(it, it, 7000)) } }
         }
+        val volumeLabel = TextView(this).apply { text = "TV volume"; setPadding(32, 16, 32, 0) }
+        volume = SeekBar(this).apply {
+            max = 100
+            progress = 100 // mirroring setup puts the TV at full volume
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
+                    if (fromUser) MirrorService.setTvVolume(value / 100.0)
+                }
+                override fun onStartTrackingTouch(bar: SeekBar) {}
+                override fun onStopTrackingTouch(bar: SeekBar) {}
+            })
+        }
         val stop = Button(this).apply {
             text = "Stop"
             setOnClickListener { startService(Intent(context, MirrorService::class.java).setAction(MirrorService.ACTION_STOP)) }
@@ -77,6 +91,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(statusView); addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(manual); addView(go); addView(stop)
+            addView(volumeLabel); addView(volume)
         })
 
         nsd = getSystemService(NsdManager::class.java)
@@ -85,6 +100,7 @@ class MainActivity : Activity() {
 
     private fun begin(t: Target) {
         pending = t
+        volume.progress = 100
         statusView.text = "Connecting to ${t.name}…"
         startActivityForResult(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent(), REQ_CAPTURE)
     }
