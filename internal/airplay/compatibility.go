@@ -85,7 +85,11 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 	if info.HasFeature(featureAudioStreamConnectionSetup) {
 		policy.audioConnections = audioLayoutStreamConnections
 	}
-	policy.audioRFC2198 = info.HasFeature(featureRFC2198Redundancy)
+	// Feature 61 is not a screen-audio switch: Apple TVs advertise it but play
+	// no mirrored audio when sent RFC 2198 (PT97) packets. Screen audio keeps
+	// plain recent-packet redundancy.
+	// ponytail: RFC 2198 path is unused; re-enable per receiver if one needs it.
+	policy.audioRFC2198 = false
 
 	// The sender gates PTP on both feature 41 and SourceVersion 354.54.6. PTP is
 	// meaningful here only after pair-verify actually encrypted the control

@@ -826,7 +826,7 @@ func TestLoggedReceiverProfilesSelectAvailablePreferredAudio(t *testing.T) {
 		profile     ReceiverProfile
 		wantRFC2198 bool
 	}{
-		{profile: ReceiverProfileModern, wantRFC2198: true},
+		{profile: ReceiverProfileModern},
 		{profile: ReceiverProfileRoku},
 		{profile: ReceiverProfileAppleTV3},
 	} {

@@ -236,16 +236,12 @@ func TestVideoOnlyCompatibilityKeepsAdvertisedAACELDWithoutLocalEncoder(t *testi
 	}
 }
 
-func TestRFC2198RedundancyRequiresAdvertisedFeature(t *testing.T) {
-	without := receiverWithFeatures()
-	without.SupportedFormats.ScreenStream = FormatMask(screenAudioFormatALAC)
-	with := receiverWithFeatures(featureRFC2198Redundancy)
-	with.SupportedFormats.ScreenStream = FormatMask(screenAudioFormatALAC)
-	if mustCompatibility(t, &without, false).audioRFC2198 {
-		t.Fatal("RFC 2198 enabled without feature 61")
-	}
-	if !mustCompatibility(t, &with, false).audioRFC2198 {
-		t.Fatal("RFC 2198 disabled with feature 61")
+func TestScreenAudioIgnoresRFC2198Feature(t *testing.T) {
+	// Apple TVs advertise feature 61 but play no mirrored audio sent as RFC 2198.
+	info := receiverWithFeatures(featureRFC2198Redundancy)
+	info.SupportedFormats.ScreenStream = FormatMask(screenAudioFormatALAC)
+	if mustCompatibility(t, &info, false).audioRFC2198 {
+		t.Fatal("RFC 2198 enabled for screen audio")
 	}
 }
 
