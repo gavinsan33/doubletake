@@ -16,6 +16,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.IBinder
 import android.util.Log
+import android.view.WindowManager
 import com.doubletake.mobile.Host
 import com.doubletake.mobile.Mobile
 import java.io.File
@@ -30,7 +31,11 @@ class MirrorService : Service(), Host {
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var codec: MediaCodec? = null
-    private var pump: Thread? = null
+    private var dm: DisplayManager? = null
+    private var canvasW = 0
+    private var canvasH = 0
+    private var encW = 0
+    private var encH = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -91,16 +96,25 @@ class MirrorService : Service(), Host {
 
     override fun startEncoder(width: Long, height: Long) {
         val proj = projection ?: error("no projection")
-        val m = resources.displayMetrics
-        val real = getSystemService(Context.WINDOW_SERVICE).let {
-            (it as android.view.WindowManager).currentWindowMetrics.bounds
-        }
-        // Fit the screen inside the receiver's canvas, keeping aspect; even sizes for H.264.
-        val scale = minOf(width.toDouble() / real.width(), height.toDouble() / real.height())
-        val w = (real.width() * scale).toInt() and 1.inv()
-        val h = (real.height() * scale).toInt() and 1.inv()
-        Log.i(TAG, "encoder ${w}x$h for canvas ${width}x$height")
+        canvasW = width.toInt(); canvasH = height.toInt()
+        val (w, h) = fit()
+        val enc = newEncoder(w, h)
+        display = proj.createVirtualDisplay("doubletake", w, h, resources.displayMetrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, enc.second, null, null)
+        encW = w; encH = h
+        // Rotation or folding changes the screen's aspect; follow it.
+        dm = getSystemService(DisplayManager::class.java).also { it.registerDisplayListener(displayListener, null) }
+    }
 
+    /** Screen fitted inside the receiver's canvas, aspect preserved, even sizes for H.264. */
+    private fun fit(): Pair<Int, Int> {
+        val real = getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
+        val scale = minOf(canvasW.toDouble() / real.width(), canvasH.toDouble() / real.height())
+        return Pair((real.width() * scale).toInt() and 1.inv(), (real.height() * scale).toInt() and 1.inv())
+    }
+
+    private fun newEncoder(w: Int, h: Int): Pair<MediaCodec, android.view.Surface> {
+        Log.i(TAG, "encoder ${w}x$h for canvas ${canvasW}x$canvasH")
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, BITRATE_KBPS * 1000)
@@ -116,16 +130,38 @@ class MirrorService : Service(), Host {
         val surface = enc.createInputSurface()
         enc.start()
         codec = enc
-        display = proj.createVirtualDisplay("doubletake", w, h, m.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, null)
-        pump = thread(name = "doubletake-encoder") { drain(enc) }
+        thread(name = "doubletake-encoder") { drain(enc) }
+        return enc to surface
+    }
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(id: Int) {}
+        override fun onDisplayRemoved(id: Int) {}
+        override fun onDisplayChanged(id: Int) {
+            if (id == android.view.Display.DEFAULT_DISPLAY) resizeEncoder()
+        }
+    }
+
+    // Swap in a new encoder at the new size. The Go sender re-sends the codec
+    // config when the SPS changes, so the receiver picks up the new dimensions.
+    @Synchronized
+    private fun resizeEncoder() {
+        val vd = display ?: return
+        val (w, h) = fit()
+        if (w == encW && h == encH) return
+        val old = codec
+        val (_, surface) = newEncoder(w, h) // sets `codec`, retiring the old pump
+        vd.resize(w, h, resources.displayMetrics.densityDpi)
+        vd.surface = surface
+        encW = w; encH = h
+        runCatching { old?.stop() }; runCatching { old?.release() }
     }
 
     private fun drain(enc: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         var config = ByteArray(0)
         try {
-            while (true) {
+            while (codec === enc) {
                 val i = enc.dequeueOutputBuffer(info, 100_000)
                 if (i < 0) continue
                 val out = enc.getOutputBuffer(i)!!
@@ -139,10 +175,12 @@ class MirrorService : Service(), Host {
                 val key = flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                 // Go expects SPS/PPS ahead of every IDR; header-prepend is best-effort on some devices.
                 val frame = if (key && !startsWithSps(data)) config + data else data
+                if (codec !== enc) break // replaced by a resize; drop stale-size frames
                 Mobile.pushFrame(frame)
                 if (flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
             }
         } catch (e: Exception) {
+            if (codec !== enc) return // retired by resizeEncoder
             // Codec released on stop, or the Go side is gone / backlogged.
             Log.i(TAG, "encoder pump ended: $e")
             Mobile.stop()
@@ -155,6 +193,7 @@ class MirrorService : Service(), Host {
     }
 
     private fun releaseCapture() {
+        dm?.unregisterDisplayListener(displayListener); dm = null
         display?.release(); display = null
         runCatching { codec?.stop() }; runCatching { codec?.release() }; codec = null
         projection?.stop(); projection = null
